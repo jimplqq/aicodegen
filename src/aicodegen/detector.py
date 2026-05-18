@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import re
 from pathlib import Path
 
@@ -11,6 +12,15 @@ class ProjectDetector:
         self.workspace = workspace
 
     def detect(self) -> ProjectAnalysis:
+        direct = self._detect_direct()
+        if direct.language != "unknown":
+            return direct
+        nested = self._detect_nested_workspace()
+        if nested is not None:
+            return nested
+        return ProjectAnalysis()
+
+    def _detect_direct(self) -> ProjectAnalysis:
         if (self.workspace / "pom.xml").exists():
             return self._detect_java_maven()
         if (self.workspace / "build.gradle").exists() or (self.workspace / "build.gradle.kts").exists():
@@ -22,6 +32,102 @@ class ProjectDetector:
         if (self.workspace / "go.mod").exists():
             return self._detect_go()
         return ProjectAnalysis()
+
+    def _detect_nested_workspace(self) -> ProjectAnalysis | None:
+        candidates: list[tuple[Path, ProjectAnalysis]] = []
+        for root in self._find_nested_project_roots():
+            analysis = ProjectDetector(root)._detect_direct()
+            if analysis.language != "unknown":
+                candidates.append((root, analysis))
+        if not candidates:
+            return None
+
+        primary_root, primary_analysis = max(candidates, key=lambda item: self._candidate_score(item[0], item[1]))
+        relative_root = str(primary_root.relative_to(self.workspace)).replace("\\", "/")
+        frontend_projects: list[str] = []
+        backend_projects: list[str] = []
+        child_projects: list[dict[str, object]] = []
+        for root, analysis in candidates:
+            relative = str(root.relative_to(self.workspace)).replace("\\", "/")
+            child_projects.append(
+                {
+                    "path": relative,
+                    "language": analysis.language,
+                    "framework": analysis.framework,
+                    "build_tool": analysis.build_tool,
+                    "architecture": analysis.architecture,
+                }
+            )
+            if analysis.language in {"javascript", "typescript"}:
+                frontend_projects.append(relative)
+            else:
+                backend_projects.append(relative)
+
+        merged = ProjectAnalysis(**asdict(primary_analysis))
+        merged.hints = {
+            **primary_analysis.hints,
+            "descriptor": primary_analysis.hints.get("descriptor", "nested"),
+            "workspace_layout": "mixed-workspace" if frontend_projects and backend_projects else "nested-workspace",
+            "project_root": relative_root,
+            "child_projects": child_projects,
+            "frontend_projects": frontend_projects,
+            "backend_projects": backend_projects,
+        }
+        merged.conventions = {
+            **primary_analysis.conventions,
+            "project_root": relative_root,
+            "frontend_projects": frontend_projects,
+            "backend_projects": backend_projects,
+        }
+        return merged
+
+    def _find_nested_project_roots(self) -> list[Path]:
+        descriptors = {"pom.xml", "build.gradle", "build.gradle.kts", "package.json", "pyproject.toml", "requirements.txt", "go.mod"}
+        ignored = {".git", ".idea", ".vscode", ".agent", "node_modules", "target", "dist", "build", "__pycache__", ".venv", "venv"}
+        roots: set[Path] = set()
+        queue: list[tuple[Path, int]] = [(self.workspace, 0)]
+        while queue:
+            current, depth = queue.pop(0)
+            if depth >= 2:
+                continue
+            for child in current.iterdir():
+                if not child.is_dir():
+                    continue
+                if child.name.startswith("."):
+                    continue
+                if child.name in ignored:
+                    continue
+                if any((child / marker).exists() for marker in descriptors):
+                    roots.add(child)
+                queue.append((child, depth + 1))
+        return sorted(roots)
+
+    def _candidate_score(self, root: Path, analysis: ProjectAnalysis) -> tuple[int, int, int, int]:
+        language_score = {
+            "java": 5,
+            "python": 4,
+            "go": 4,
+            "typescript": 2,
+            "javascript": 2,
+        }.get(analysis.language, 0)
+        architecture_score = {
+            "ruoyi": 4,
+            "multi-module": 3,
+            "standard": 1,
+        }.get(analysis.architecture, 0)
+        framework_score = 2 if analysis.framework == "spring-boot" else 0
+        root_name = root.name.lower()
+        path_score = 0
+        if any(token in root_name for token in ("server", "backend", "api")):
+            path_score += 2
+        if any(token in root_name for token in ("web", "ui", "front", "uniapp")):
+            path_score -= 1
+        return (
+            language_score,
+            architecture_score,
+            framework_score,
+            path_score,
+        )
 
     def _detect_java_maven(self) -> ProjectAnalysis:
         pom = (self.workspace / "pom.xml").read_text(encoding="utf-8", errors="ignore")

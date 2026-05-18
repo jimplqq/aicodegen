@@ -30,18 +30,14 @@ class CrudGenerator:
             raise ValueError("crud_generator is not configured for this workspace.")
 
         config = tool.config
-        module_name = config.get("module_name") or self.tools_config.project_profile.get("business_module") or ""
-        if not module_name or module_name == "unknown":
-            raise ValueError("Workspace is missing a target module for crud generation.")
-
         entity_name = self._normalize_entity_name(entity_name)
         feature_spec = self._prepare_spec(entity_name, comment=comment, spec=spec)
-        module_dir = self.workspace / module_name
+        module_dir = self._resolve_module_dir()
 
-        domain_package = config["domain_package"]
-        mapper_package = config["mapper_package"]
-        service_package = config["service_package"]
-        controller_package = config["controller_package"]
+        domain_package = self._required_config(config, "domain_package", "crud generation")
+        mapper_package = self._required_config(config, "mapper_package", "crud generation")
+        service_package = self._required_config(config, "service_package", "crud generation")
+        controller_package = self._required_config(config, "controller_package", "crud generation")
         bo_package = feature_spec.bo_package or self._derive_bo_package(controller_package)
         vo_package = feature_spec.vo_package or self._derive_vo_package(controller_package)
         mapper_xml = bool(config.get("mapper_xml", True))
@@ -137,19 +133,48 @@ class CrudGenerator:
         if tool is None:
             raise ValueError("crud_generator is not configured for this workspace.")
         config = tool.config
-        module_name = config.get("module_name") or self.tools_config.project_profile.get("business_module") or ""
-        if not module_name or module_name == "unknown":
-            raise ValueError("Workspace is missing a target module for entity generation.")
         entity_name = self._normalize_entity_name(entity_name)
         feature_spec = self._prepare_spec(entity_name, comment=comment, spec=spec)
-        module_dir = self.workspace / module_name
-        domain_package = config["domain_package"]
+        module_dir = self._resolve_module_dir()
+        domain_package = self._required_config(config, "domain_package", "entity generation")
         domain_path = self._java_path(module_dir, domain_package, f"{entity_name}.java")
         self._write_file(
             domain_path,
             self._domain_template(domain_package, entity_name, feature_spec.comment, feature_spec.fields, config.get("entity_base_class", "BaseEntity")),
         )
         return GeneratedFile(domain_path, "domain")
+
+    def _resolve_module_dir(self) -> Path:
+        module_name = self._target_module_name()
+        project_root = self._project_root()
+        base_dir = self.workspace / project_root if project_root else self.workspace
+        return base_dir / module_name if module_name else base_dir
+
+    def _target_module_name(self) -> str:
+        tool = self.tools_config.tools.get("crud_generator")
+        module_name = ""
+        if tool is not None:
+            module_name = str(tool.config.get("module_name", "") or "")
+        if not module_name:
+            module_name = str(self.tools_config.project_profile.get("business_module", "") or "")
+        if module_name == "unknown":
+            module_name = ""
+        return module_name
+
+    def _project_root(self) -> Path:
+        tool = self.tools_config.tools.get("crud_generator")
+        project_root = ""
+        if tool is not None:
+            project_root = str(tool.config.get("project_root", "") or "")
+        if not project_root:
+            project_root = str(self.tools_config.project_profile.get("project_root", "") or "")
+        return Path(project_root) if project_root else Path()
+
+    def _required_config(self, config: dict[str, object], key: str, operation: str) -> str:
+        value = str(config.get(key, "") or "")
+        if not value or value == "unknown":
+            raise ValueError(f"Workspace is missing {key} for {operation}.")
+        return value
 
     def _prepare_spec(self, entity_name: str, *, comment: str | None, spec: FeatureSpec | None) -> FeatureSpec:
         if spec is not None:

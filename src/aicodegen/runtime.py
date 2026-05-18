@@ -144,17 +144,27 @@ class RuntimeService:
             ],
         }
 
+    def prepare_tools_config_for_generation(self) -> object:
+        self.storage.ensure()
+        analysis = self.detector.detect()
+        self.storage.save_analysis(analysis)
+        tools_config = self._ensure_tools_config(analysis)
+        self.storage.save_tools_config(tools_config)
+        return tools_config
+
     def _ensure_tools_config(self, analysis):
         tools_config = self.storage.load_tools_config()
         crud_tool = tools_config.tools.get("crud_generator")
         crud_module = ""
+        template_profile = ""
         if crud_tool is not None:
             crud_module = str(crud_tool.config.get("module_name", "") or "")
+            template_profile = str(crud_tool.config.get("template_profile", "") or "")
+        requires_explicit_module = template_profile == "ruoyi-mybatis" or analysis.architecture == "ruoyi"
         needs_refresh = (
             not tools_config.tools
             or crud_tool is None
-            or not crud_module
-            or crud_module == "unknown"
+            or (requires_explicit_module and (not crud_module or crud_module == "unknown"))
         )
         if needs_refresh:
             rebuilt = self.configurator.build(analysis)
@@ -162,7 +172,23 @@ class RuntimeService:
             if not rebuilt.suggested_tools:
                 rebuilt.suggested_tools = tools_config.suggested_tools
             return rebuilt
+        rebuilt = self.configurator.build(analysis)
+        rebuilt.enabled_tools = tools_config.enabled_tools
+        if not rebuilt.suggested_tools:
+            rebuilt.suggested_tools = tools_config.suggested_tools
+        return self._merge_missing_tool_defaults(tools_config, rebuilt)
         return tools_config
+
+    def _merge_missing_tool_defaults(self, current, rebuilt):
+        current.project_profile = {**rebuilt.project_profile, **current.project_profile}
+        current.suggested_tools = current.suggested_tools or rebuilt.suggested_tools
+        for name, rebuilt_entry in rebuilt.tools.items():
+            current_entry = current.tools.get(name)
+            if current_entry is None:
+                current.tools[name] = rebuilt_entry
+                continue
+            current_entry.config = {**rebuilt_entry.config, **current_entry.config}
+        return current
 
     def _build_workspace_config(
         self,

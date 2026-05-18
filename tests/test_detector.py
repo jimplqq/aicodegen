@@ -46,6 +46,9 @@ class DetectorTests(unittest.TestCase):
             self.assertEqual(analysis.java_version, "17")
             self.assertEqual(analysis.spring_boot_version, "3.2.5")
             self.assertEqual(analysis.test_framework, "junit5")
+            config = WorkspaceConfigurator().build(analysis)
+            self.assertEqual(config.tools["crud_generator"].config["module_name"], "")
+            self.assertEqual(config.tools["crud_generator"].config["domain_package"], "com.example.domain")
 
     def test_detects_java_orm_and_libraries(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -124,6 +127,102 @@ class DetectorTests(unittest.TestCase):
             self.assertEqual(config.tools["crud_generator"].config["template_profile"], "ruoyi-mybatis")
             self.assertEqual(config.project_profile["business_module"], "ruoyi-em")
             self.assertEqual(config.tools["crud_generator"].config["controller_package"], "com.ruoyi.em.controller")
+
+    def test_detects_nested_backend_and_frontend_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            nested_backend = workspace / "e-hospital-server" / "ehospital"
+            nested_backend.mkdir(parents=True, exist_ok=True)
+            (nested_backend / "pom.xml").write_text(
+                """
+                <project>
+                  <parent>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-parent</artifactId>
+                    <version>3.2.5</version>
+                  </parent>
+                  <modules>
+                    <module>ehospital-core</module>
+                    <module>ehospital-miniprogram</module>
+                  </modules>
+                  <dependencies>
+                    <dependency>
+                      <groupId>org.springframework.boot</groupId>
+                      <artifactId>spring-boot-starter-test</artifactId>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """,
+                encoding="utf-8",
+            )
+            java_file = nested_backend / "ehospital-miniprogram" / "src" / "main" / "java" / "com" / "xjzy" / "mc" / "ehospital" / "miniprogram" / "controller" / "DemoController.java"
+            java_file.parent.mkdir(parents=True, exist_ok=True)
+            java_file.write_text(
+                "package com.xjzy.mc.ehospital.miniprogram.controller;\npublic class DemoController {}\n",
+                encoding="utf-8",
+            )
+            web = workspace / "e-hospital-web"
+            web.mkdir(parents=True, exist_ok=True)
+            (web / "package.json").write_text(
+                """
+                {
+                  "dependencies": {
+                    "vue": "^3.0.0"
+                  },
+                  "devDependencies": {
+                    "vite": "^5.0.0"
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            analysis = ProjectDetector(workspace).detect()
+            self.assertEqual(analysis.language, "java")
+            self.assertEqual(analysis.build_tool, "maven")
+            self.assertEqual(analysis.framework, "spring-boot")
+            self.assertEqual(analysis.architecture, "multi-module")
+            self.assertEqual(analysis.hints["project_root"], "e-hospital-server/ehospital")
+            self.assertEqual(analysis.hints["workspace_layout"], "mixed-workspace")
+            self.assertIn("e-hospital-web", analysis.hints["frontend_projects"])
+            config = WorkspaceConfigurator().build(analysis)
+            self.assertEqual(config.project_profile["project_root"], "e-hospital-server/ehospital")
+
+    def test_generates_ruoyi_crud_files_in_nested_backend_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            backend = workspace / "backend"
+            backend.mkdir(parents=True, exist_ok=True)
+            (backend / "pom.xml").write_text(
+                """
+                <project>
+                  <modules>
+                    <module>ruoyi-admin</module>
+                    <module>ruoyi-em</module>
+                  </modules>
+                </project>
+                """,
+                encoding="utf-8",
+            )
+            java_file = backend / "ruoyi-em" / "src" / "main" / "java" / "com" / "ruoyi" / "em" / "controller" / "DemoController.java"
+            java_file.parent.mkdir(parents=True, exist_ok=True)
+            java_file.write_text(
+                "package com.ruoyi.em.controller;\npublic class DemoController {}\n",
+                encoding="utf-8",
+            )
+            mapper_xml = backend / "ruoyi-em" / "src" / "main" / "resources" / "mapper" / "em" / "DemoMapper.xml"
+            mapper_xml.parent.mkdir(parents=True, exist_ok=True)
+            mapper_xml.write_text("<mapper></mapper>", encoding="utf-8")
+            frontend = workspace / "web"
+            frontend.mkdir(parents=True, exist_ok=True)
+            (frontend / "package.json").write_text('{"dependencies":{"vue":"^3.0.0"}}', encoding="utf-8")
+
+            analysis = ProjectDetector(workspace).detect()
+            self.assertEqual(analysis.hints["project_root"], "backend")
+            tools_config = WorkspaceConfigurator().build(analysis)
+            generated = CrudGenerator(workspace, tools_config).generate("LampPlan", comment="灯具方案")
+            generated_paths = {item.kind: item.path for item in generated}
+            self.assertTrue(generated_paths["domain"].exists())
+            self.assertIn(str(backend / "ruoyi-em"), str(generated_paths["domain"]))
 
     def test_generates_ruoyi_crud_files(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -233,6 +332,65 @@ class DetectorTests(unittest.TestCase):
             content = generated.path.read_text(encoding="utf-8")
             self.assertIn("class DeviceLedger", content)
             self.assertIn("设备台账对象 DeviceLedger", content)
+
+    def test_generates_entity_for_single_module_spring_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "pom.xml").write_text(
+                """
+                <project>
+                  <parent>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-parent</artifactId>
+                    <version>3.2.5</version>
+                  </parent>
+                </project>
+                """,
+                encoding="utf-8",
+            )
+            java_file = workspace / "src" / "main" / "java" / "com" / "demo" / "mini" / "DemoApplication.java"
+            java_file.parent.mkdir(parents=True, exist_ok=True)
+            java_file.write_text(
+                "package com.demo.mini;\npublic class DemoApplication {}\n",
+                encoding="utf-8",
+            )
+            service = RuntimeService(workspace)
+            service.init_workspace()
+            generated = CrudGenerator(workspace, service.prepare_tools_config_for_generation()).generate_entity("DeviceLedger", comment="设备台账")
+            self.assertTrue(generated.path.exists())
+            self.assertEqual(generated.path, workspace / "src" / "main" / "java" / "com" / "demo" / "mini" / "domain" / "DeviceLedger.java")
+
+    def test_runtime_prepare_tools_config_recovers_single_module_java_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "pom.xml").write_text(
+                """
+                <project>
+                  <parent>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-parent</artifactId>
+                    <version>3.2.5</version>
+                  </parent>
+                </project>
+                """,
+                encoding="utf-8",
+            )
+            java_file = workspace / "src" / "main" / "java" / "com" / "demo" / "mini" / "DemoApplication.java"
+            java_file.parent.mkdir(parents=True, exist_ok=True)
+            java_file.write_text(
+                "package com.demo.mini;\npublic class DemoApplication {}\n",
+                encoding="utf-8",
+            )
+            service = RuntimeService(workspace)
+            service.storage.ensure()
+            service.storage.tools_path.write_text(
+                '{"enabled_tools":[],"suggested_tools":["crud_generator"],"project_profile":{"language":"java","framework":"spring-boot","build_tool":"maven","orm":"unknown","base_package":"com.demo.mini","architecture":"standard","modules":[],"project_root":"","frontend_projects":[],"backend_projects":[]},"tools":{"crud_generator":{"status":"learned","config":{"template_profile":"spring-generic","project_root":"","base_package":"com.demo.mini","orm":"unknown"},"metadata":{},"last_error":""}}}',
+                encoding="utf-8",
+            )
+            tools_config = service.prepare_tools_config_for_generation()
+            crud_config = tools_config.tools["crud_generator"].config
+            self.assertEqual(crud_config["module_name"], "")
+            self.assertEqual(crud_config["controller_package"], "com.demo.mini.controller")
 
     def test_feature_planner_infers_entity_name(self) -> None:
         planner = FeaturePlanner()

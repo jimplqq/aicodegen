@@ -96,7 +96,7 @@ def main() -> None:
                 )
             )
             return
-        tools_config = service.storage.load_tools_config()
+        tools_config = service.prepare_tools_config_for_generation()
         if args.generate_command == "entity":
             generated = CrudGenerator(workspace, tools_config).generate_entity(
                 args.entity,
