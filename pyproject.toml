@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aicodegen"
+version = "0.1.0"
+description = "Shared on-demand AI code generation runtime"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "AI Agent Team" }
+]
+
+[project.scripts]
+aicodegen = "aicodegen.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
