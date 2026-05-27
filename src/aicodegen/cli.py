@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true", help="Replace existing workspace configuration with fresh defaults before applying overrides.")
     subparsers.add_parser("detect", help="Detect the workspace language and stack.")
     subparsers.add_parser("status", help="Show workspace runtime status.")
+    subparsers.add_parser("doctor", help="Check workspace initialization, detection, and template readiness.")
     subparsers.add_parser("mcp", help="Run the MCP stdio entry point.")
     ensure_template = subparsers.add_parser("ensure-template", help="Ensure a learned template exists for a tool.")
     ensure_template.add_argument("--tool", default="crud_generator", help="Tool name to prepare. Defaults to crud_generator.")
@@ -42,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     feature.add_argument("--name", required=True, help="Feature name, for example 设备台账.")
     feature.add_argument("--entity", help="Optional explicit entity name, for example DeviceLedger.")
     feature.add_argument("--spec-file", help="Optional JSON file with structured generation parameters.")
+    feature.add_argument("--sql", help="Optional CREATE TABLE DDL used as the source of truth for entity and fields.")
+    feature.add_argument("--sql-file", help="Optional SQL file containing a CREATE TABLE DDL.")
     return parser
 
 
@@ -73,6 +76,9 @@ def main() -> None:
     if args.command == "status":
         print(json.dumps(service.status(), indent=2, ensure_ascii=False))
         return
+    if args.command == "doctor":
+        print(json.dumps(service.doctor(), indent=2, ensure_ascii=False))
+        return
     if args.command == "mcp":
         raise SystemExit(run_stdio_server(workspace))
     if args.command == "ensure-template":
@@ -84,12 +90,17 @@ def main() -> None:
             if getattr(args, "spec_file", None):
                 spec_path = Path(args.spec_file).resolve()
                 spec_data = json.loads(spec_path.read_text(encoding="utf-8"))
+            sql = getattr(args, "sql", None)
+            if getattr(args, "sql_file", None):
+                sql_path = Path(args.sql_file).resolve()
+                sql = sql_path.read_text(encoding="utf-8")
             print(
                 json.dumps(
                     service.generate_feature(
                         args.name,
                         entity_name=getattr(args, "entity", None),
                         spec_data=spec_data,
+                        sql=sql,
                     ),
                     indent=2,
                     ensure_ascii=False,

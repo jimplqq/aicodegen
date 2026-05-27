@@ -72,7 +72,7 @@
 - 你可以用它检测 Python、Node、Go 项目
 - 但当前真正成熟的生成逻辑，还是 Java CRUD 方向
 
-另外，模板生命周期虽然已经有基础状态和元数据持久化，但完整的验证、失败恢复、重试与 doctor 命令还在继续推进。
+另外，模板生命周期已经具备基础验证、失败状态落盘和 `doctor` 检查；后续还需要接入目标项目的真实构建/测试命令，完成更强的验证闭环。
 
 ## 项目结构
 
@@ -222,6 +222,14 @@ aicodegen --workspace . status
 - 建议工具列表
 - 各工具当前状态和模板元数据
 
+也可以用 `doctor` 做生成前检查：
+
+```bash
+aicodegen --workspace . doctor
+```
+
+它会检查工作区是否初始化、项目是否可识别，以及 `crud_generator` 模板是否已经验证。模板未准备时会作为 warning 返回；真正执行生成前仍会自动准备并验证模板。
+
 ### 4. 准备模板
 
 ```bash
@@ -233,9 +241,11 @@ aicodegen --workspace . ensure-template --tool crud_generator
 - 扫描项目里的样例文件
 - 为 `crud_generator` 生成模板元数据
 - 把结果写入 `.agent/templates/`
-- 更新工具状态
+- 验证模板配置是否具备生成所需的包路径、模块名和返回类型
+- 如果 `init` 时配置了 `--build-command` 或 `--test-command`，会实际执行这些命令
+- 更新工具状态为 `verified` 或 `failed`
 
-后续再次执行时会优先复用已有模板，而不是重复学习。
+后续再次执行时会优先复用已有模板，而不是重复学习；如果验证命令失败，模板会被标记为 `failed`，后续生成会拒绝继续使用该模板。
 
 ### 5. 生成代码
 
@@ -251,13 +261,34 @@ aicodegen --workspace . generate entity --entity DeviceLedger --comment 设备�
 aicodegen --workspace . generate crud --entity DeviceLedger --comment 设备台账
 ```
 
+#### 通过 SQL DDL 生成（推荐）
+
+为了通用性，完整功能生成应优先以 SQL 表结构作为源头。工具会从 `CREATE TABLE` 推导：
+
+- 表名
+- 实体类名
+- 字段名和 Java 类型
+- 字段注释
+- 查询条件默认类型
+- mapper XML 里的列映射
+
+```bash
+aicodegen --workspace . generate feature --name 设备台账 --sql-file device_ledger.sql
+```
+
+也可以直接传入 SQL：
+
+```bash
+aicodegen --workspace . generate feature --name 设备台账 --sql "CREATE TABLE device_ledger (id bigint COMMENT '主键ID') COMMENT='设备台账';"
+```
+
 #### 通过自然语言特征名生成
 
 ```bash
 aicodegen --workspace . generate feature --name 设备台账
 ```
 
-如果你想明确指定实体名：
+没有 SQL 时，工具会继续兼容旧逻辑：通过自然语言或显式实体名推导代码结构。如果你想明确指定实体名：
 
 ```bash
 aicodegen --workspace . generate feature --name 设备台账 --entity DeviceLedger
@@ -290,8 +321,8 @@ aicodegen --workspace . init \
 - `--language`: 覆盖自动识别的语言
 - `--framework`: 覆盖自动识别的框架
 - `--template-root`: 指定模板目录，支持相对或绝对路径
-- `--build-command`: 保存工作区构建命令
-- `--test-command`: 保存工作区测试命令
+- `--build-command`: 保存工作区构建命令；模板准备和生成后会执行
+- `--test-command`: 保存工作区测试命令；模板准备和生成后会执行
 - `--force`: 以默认配置重新初始化，再应用本次覆盖项
 
 ## 工作区状态文件说明
@@ -433,6 +464,7 @@ aicodegen --workspace /c/workspace/your-project mcp
 ### 当前暴露的 MCP 工具
 
 - `project_status`
+- `doctor`
 - `ensure_template`
 - `generate_entity`
 - `generate_crud`
@@ -443,8 +475,9 @@ aicodegen --workspace /c/workspace/your-project mcp
 当用户说“新增设备台账功能”“生成 CRUD”“补一个后台模块骨架”时，推荐 Agent 这样调用：
 
 1. `project_status`
-2. 必要时调用 `ensure_template`
-3. 调用 `generate_feature`
+2. `doctor`
+3. 必要时调用 `ensure_template`
+4. 调用 `generate_feature`
 
 ### MCP 配置示例
 
@@ -509,8 +542,7 @@ python -m compileall src\aicodegen
 ## 当前已知限制
 
 - 生成逻辑目前主要面向 Java，尤其是 RuoYi / Spring 类项目
-- 模板验证与失败恢复还没有完全打通
-- 还没有独立的 doctor 命令
+- 模板验证已覆盖核心配置完整性、失败状态落盘，以及可选目标项目 build/test 命令执行
 - 还没有多种生成工具的完整注册中心
 - 还没有覆盖更多框架的专用模板体系
 
@@ -518,8 +550,8 @@ python -m compileall src\aicodegen
 
 接下来值得继续补强的点包括：
 
-1. 模板验证阶段和失败恢复流程
-2. doctor / diagnose 类命令
+1. 扩展 doctor / diagnose 输出更多修复建议
+2. 增加验证命令超时、环境变量和工作目录的可配置项
 3. 更清晰的工具生命周期管理
 4. 更多框架和项目结构的模板支持
 5. 更完整的 MCP 协议与使用说明

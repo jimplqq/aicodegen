@@ -33,6 +33,15 @@ def _tool_definitions() -> list[ToolDefinition]:
             },
         ),
         ToolDefinition(
+            name="doctor",
+            description="Check workspace initialization, detection, and template readiness.",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+        ToolDefinition(
             name="ensure_template",
             description="Ensure a reusable project template exists for the specified tool.",
             input_schema={
@@ -75,7 +84,7 @@ def _tool_definitions() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="generate_feature",
-            description="High-level feature generator. Infers the entity name, ensures templates, then generates entity and CRUD files.",
+            description="High-level feature generator. Prefer SQL DDL as the source of truth, then structured spec, then entity/name inference.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -84,6 +93,10 @@ def _tool_definitions() -> list[ToolDefinition]:
                     "spec": {
                         "type": "object",
                         "description": "Optional structured feature specification with table_name, route_path, permission_prefix, and fields.",
+                    },
+                    "sql": {
+                        "type": "string",
+                        "description": "Optional CREATE TABLE DDL used as the source of truth for entity and fields.",
                     },
                 },
                 "required": ["name"],
@@ -198,11 +211,15 @@ class McpServer:
 
         if name == "project_status":
             return self.runtime.status()
+        if name == "doctor":
+            return self.runtime.doctor()
         if name == "ensure_template":
             tool_name = str(arguments.get("tool", "crud_generator"))
             return self.runtime.ensure_template(tool_name)
         if name == "generate_entity":
-            tools_config = self.runtime._ensure_tools_config(self.runtime.detector.detect())
+            template_result = self.runtime.ensure_template("crud_generator")
+            self.runtime._raise_if_template_failed(template_result)
+            tools_config = self.runtime.storage.load_tools_config()
             generated = CrudGenerator(self.workspace, tools_config).generate_entity(
                 str(arguments["entity"]),
                 comment=arguments.get("comment"),
@@ -212,7 +229,9 @@ class McpServer:
                 "generated_file": {"kind": generated.kind, "path": str(generated.path)},
             }
         if name == "generate_crud":
-            tools_config = self.runtime._ensure_tools_config(self.runtime.detector.detect())
+            template_result = self.runtime.ensure_template("crud_generator")
+            self.runtime._raise_if_template_failed(template_result)
+            tools_config = self.runtime.storage.load_tools_config()
             generated = CrudGenerator(self.workspace, tools_config).generate(
                 str(arguments["entity"]),
                 comment=arguments.get("comment"),
@@ -229,6 +248,7 @@ class McpServer:
                 str(arguments["name"]),
                 entity_name=arguments.get("entity"),
                 spec_data=arguments.get("spec"),
+                sql=arguments.get("sql"),
             )
         raise ValueError(f"Unknown tool: {name}")
 

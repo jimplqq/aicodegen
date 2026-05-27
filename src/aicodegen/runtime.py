@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from .configurator import WorkspaceConfigurator
 from .detector import ProjectDetector
-from .generator import CrudGenerator, FeaturePlanner
+from .generator import CrudGenerator, FeaturePlanner, SqlSpecParser
 from .models import FeatureSpec, WorkspaceConfig
 from .path_setup import PathSetupService
 from .storage import WorkspaceStorage
@@ -21,6 +22,7 @@ class RuntimeService:
         self.configurator = WorkspaceConfigurator()
         self.template_manager = TemplateManager(workspace, self.storage)
         self.feature_planner = FeaturePlanner()
+        self.sql_spec_parser = SqlSpecParser()
         self.path_setup = PathSetupService(workspace)
 
     def init_workspace(
@@ -102,12 +104,78 @@ class RuntimeService:
             },
         }
 
+    def doctor(self) -> dict[str, object]:
+        checks: list[dict[str, object]] = []
+        initialized = self.storage.agent_dir.exists()
+        checks.append(
+            {
+                "code": "workspace_initialized" if initialized else "workspace_not_initialized",
+                "ok": initialized,
+                "message": ".agent workspace state exists." if initialized else "Run `aicodegen init` before generation.",
+            }
+        )
+        analysis = self.detector.detect()
+        checks.append(
+            {
+                "code": "project_detected" if analysis.language != "unknown" else "project_unknown",
+                "ok": analysis.language != "unknown",
+                "message": f"Detected {analysis.language}/{analysis.framework}.",
+            }
+        )
+        tools_config = self.storage.load_tools_config() if self.storage.tools_path.exists() else self.configurator.build(analysis)
+        crud_tool = tools_config.tools.get("crud_generator")
+        template_path = self.storage.template_path("crud_generator") if initialized else self.workspace / ".agent" / "templates" / "crud_generator.json"
+        template_state = "missing"
+        template_ok = False
+        last_error = ""
+        if template_path.exists():
+            import json
+
+            payload = json.loads(template_path.read_text(encoding="utf-8"))
+            template_state = str(payload.get("lifecycle_state", "unknown"))
+            last_error = str(payload.get("last_error", ""))
+            template_ok = template_state == "verified"
+            validation = payload.get("failure_details", {})
+        elif crud_tool is not None and crud_tool.status in {"verified", "learned"}:
+            template_state = crud_tool.status
+            template_ok = crud_tool.status == "verified"
+            last_error = crud_tool.last_error
+            validation = {}
+        else:
+            validation = {}
+        checks.append(
+            {
+                "code": "template_verified" if template_ok else "template_not_verified",
+                "ok": True,
+                "message": f"crud_generator template state: {template_state}",
+                "last_error": last_error,
+                "severity": "info" if template_ok else "warning",
+                "details": validation,
+            }
+        )
+        ready = all(bool(item["ok"]) for item in checks)
+        return {
+            "workspace": str(self.workspace),
+            "ready": ready,
+            "detected": analysis.to_dict(),
+            "checks": checks,
+        }
+
     def ensure_template(self, tool_name: str) -> dict[str, object]:
         self.storage.ensure()
         analysis = self.detector.detect()
         self.storage.save_analysis(analysis)
         tools_config = self._ensure_tools_config(analysis)
         result = self.template_manager.ensure_template(tool_name, analysis, tools_config)
+        validation = self._run_validation_commands(self.storage.load_workspace_config())
+        result["validation"] = validation
+        if not validation["ok"]:
+            result = self.template_manager.mark_failed(
+                tool_name,
+                tools_config,
+                str(validation["last_error"]),
+                details={"validation": validation},
+            )
         self.storage.save_tools_config(tools_config)
         return result
 
@@ -117,6 +185,7 @@ class RuntimeService:
         *,
         entity_name: str | None = None,
         spec_data: dict[str, object] | None = None,
+        sql: str | None = None,
     ) -> dict[str, object]:
         self.storage.ensure()
         analysis = self.detector.detect()
@@ -124,17 +193,37 @@ class RuntimeService:
         tools_config = self._ensure_tools_config(analysis)
         template_result = self.template_manager.ensure_template("crud_generator", analysis, tools_config)
         self.storage.save_tools_config(tools_config)
+        self._raise_if_template_failed(template_result)
 
-        resolved_entity = self.feature_planner.infer_entity_name(feature_name, explicit_entity=entity_name)
-        feature_spec = None if spec_data is None else FeatureSpec.from_dict(spec_data)
+        feature_spec = None
+        source = "name"
+        if sql:
+            feature_spec = self.sql_spec_parser.parse(sql, fallback_name=feature_name)
+            source = "sql"
+        elif spec_data is not None:
+            feature_spec = FeatureSpec.from_dict(spec_data)
+            source = "spec"
+        resolved_entity = entity_name or (feature_spec.entity if feature_spec is not None else "")
+        resolved_entity = self.feature_planner.infer_entity_name(feature_name, explicit_entity=resolved_entity or None)
         generator = CrudGenerator(self.workspace, tools_config)
         entity_file = generator.generate_entity(resolved_entity, comment=feature_name, spec=feature_spec)
         generated = generator.generate(resolved_entity, comment=feature_name, spec=feature_spec)
+        validation = self._run_validation_commands(self.storage.load_workspace_config())
+        if not validation["ok"]:
+            failed_result = self.template_manager.mark_failed(
+                "crud_generator",
+                tools_config,
+                str(validation["last_error"]),
+                details={"validation": validation},
+            )
+            self.storage.save_tools_config(tools_config)
+            self._raise_if_template_failed(failed_result)
 
         return {
             "workspace": str(self.workspace),
             "feature_name": feature_name,
             "entity_name": resolved_entity,
+            "source": source,
             "feature_spec": None if feature_spec is None else feature_spec.to_dict(),
             "template": template_result,
             "entity_file": {"kind": entity_file.kind, "path": str(entity_file.path)},
@@ -142,6 +231,7 @@ class RuntimeService:
                 {"kind": item.kind, "path": str(item.path)}
                 for item in generated
             ],
+            "validation": validation,
         }
 
     def prepare_tools_config_for_generation(self) -> object:
@@ -151,6 +241,54 @@ class RuntimeService:
         tools_config = self._ensure_tools_config(analysis)
         self.storage.save_tools_config(tools_config)
         return tools_config
+
+    def _raise_if_template_failed(self, result: dict[str, object]) -> None:
+        if result.get("lifecycle_state") == "failed":
+            template = result.get("template", {})
+            last_error = ""
+            if isinstance(template, dict):
+                last_error = str(template.get("last_error", ""))
+            raise RuntimeError(last_error or "Template preparation failed.")
+
+    def _run_validation_commands(self, workspace_config: WorkspaceConfig) -> dict[str, object]:
+        commands: list[tuple[str, str]] = []
+        build_command = workspace_config.script_commands.get("build", "").strip()
+        test_command = workspace_config.validation_commands.get("test", "").strip()
+        if build_command:
+            commands.append(("build", build_command))
+        if test_command:
+            commands.append(("test", test_command))
+        results: list[dict[str, object]] = []
+        for name, command in commands:
+            result = self._run_workspace_command(name, command)
+            results.append(result)
+            if not result["ok"]:
+                return {
+                    "ok": False,
+                    "commands": results,
+                    "last_error": f"{name} command failed with exit code {result['exit_code']}: {command}",
+                }
+        return {"ok": True, "commands": results, "last_error": ""}
+
+    def _run_workspace_command(self, name: str, command: str) -> dict[str, object]:
+        completed = subprocess.run(
+            command,
+            cwd=self.workspace,
+            shell=True,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
+        return {
+            "name": name,
+            "command": command,
+            "exit_code": completed.returncode,
+            "ok": completed.returncode == 0,
+            "stdout": completed.stdout[-4000:],
+            "stderr": completed.stderr[-4000:],
+        }
 
     def _ensure_tools_config(self, analysis):
         tools_config = self.storage.load_tools_config()
